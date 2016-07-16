@@ -2,7 +2,7 @@
 
 import sys
 
-from troposphere import Template, Ref, Output, Parameter, Join, GetAtt
+from troposphere import Template, Ref, Output, Parameter, Join, GetAtt, FindInMap
 from troposphere.route53 import RecordSetType, RecordSet, RecordSetGroup, AliasTarget
 from troposphere.s3 import Bucket, PublicRead, BucketOwnerFullControl, WebsiteConfiguration, RedirectAllRequestsTo
 
@@ -11,6 +11,18 @@ import botocore
 
 
 t = Template()
+
+
+t.add_mapping("RegionMap", {
+            "us-east-1" : { "S3hostedzoneID" : "Z3AQBSTGFYJSTF", "websiteendpoint" : "s3-website-us-east-1.amazonaws.com" },
+            "us-west-1" : { "S3hostedzoneID" : "Z2F56UZL2M1ACD", "websiteendpoint" : "s3-website-us-west-1.amazonaws.com" },
+            "us-west-2" : { "S3hostedzoneID" : "Z3BJ6K6RIION7M", "websiteendpoint" : "s3-website-us-west-2.amazonaws.com" },            
+            "eu-west-1" : { "S3hostedzoneID" : "Z1BKCTXD74EZPE", "websiteendpoint" : "s3-website-eu-west-1.amazonaws.com" },
+            "ap-southeast-1" : { "S3hostedzoneID" : "Z3O0J2DXBE1FTB", "websiteendpoint" : "s3-website-ap-southeast-1.amazonaws.com" },
+            "ap-southeast-2" : { "S3hostedzoneID" : "Z1WCIGYICN2BYD", "websiteendpoint" : "s3-website-ap-southeast-2.amazonaws.com" },
+            "ap-northeast-1" : { "S3hostedzoneID" : "Z2M4EHUR26P7ZW", "websiteendpoint" : "s3-website-ap-northeast-1.amazonaws.com" },
+            "sa-east-1" : { "S3hostedzoneID" : "Z31GFT0UA1I2HV", "websiteendpoint" : "s3-website-sa-east-1.amazonaws.com" }
+        })
 
 
 hostedzone = t.add_parameter(Parameter(
@@ -22,16 +34,21 @@ hostedzone = t.add_parameter(Parameter(
 
 root_bucket = t.add_resource(
     Bucket("RootBucket",
+           BucketName=Ref(hostedzone),
            AccessControl=PublicRead,
            WebsiteConfiguration=WebsiteConfiguration(
                IndexDocument="index.html",
            )
     ))
-www_bucket = t.add_resource(Bucket("WWWBucket", AccessControl=BucketOwnerFullControl, WebsiteConfiguration=WebsiteConfiguration(
-    RedirectAllRequestsTo=RedirectAllRequestsTo(
-        HostName=Ref(root_bucket)
-    )
-)))
+www_bucket = t.add_resource(
+    Bucket("WWWBucket",
+           BucketName=Join('.', ['www', Ref(hostedzone)]),
+           AccessControl=PublicRead,
+           WebsiteConfiguration=WebsiteConfiguration(
+               RedirectAllRequestsTo=RedirectAllRequestsTo(
+                   HostName=Ref(root_bucket)
+               )
+           )))
 
 
 record = t.add_resource(RecordSetGroup(
@@ -42,8 +59,8 @@ record = t.add_resource(RecordSetGroup(
             Name=Ref(hostedzone),
             Type='A',
             AliasTarget=AliasTarget(
-                hostedzoneid='Z1BKCTXD74EZPE',
-                dnsname='s3-website-eu-west-1.amazonaws.com',
+                hostedzoneid=FindInMap('RegionMap', Ref('AWS::Region'), 'S3hostedzoneID'),
+                dnsname=FindInMap('RegionMap', Ref('AWS::Region'), 'websiteendpoint'),
             )
         ),
         RecordSet(
@@ -51,7 +68,7 @@ record = t.add_resource(RecordSetGroup(
             Type='CNAME',
             TTL='900',
             ResourceRecords=[
-                GetAtt(www_bucket, 'DomainName')
+                Join('.', ['www', Ref(hostedzone), FindInMap('RegionMap', Ref('AWS::Region'), 'websiteendpoint')])
             ]
         ),
     ]
@@ -90,5 +107,18 @@ except botocore.exceptions.ClientError:
         StackName=stack_name,
     )
 
+
+try:
+    client.update_stack(StackName=stack_name, TemplateBody=t.to_json(), Parameters=[
+        {'ParameterKey': 'HostedZone', 'ParameterValue': domain},
+    ])
+    waiter = client.get_waiter('stack_update_complete')
+    waiter.wait(StackName=stack_name)
+    response = client.describe_stacks(
+        StackName=stack_name,
+    )
+except Exception as e:
+    print(e, file=sys.stderr)
+    pass
     
 print(response['Stacks'][0]['Outputs'][0]['OutputValue'])
